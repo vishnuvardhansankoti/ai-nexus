@@ -1,0 +1,33 @@
+# Binary output
+bin/
+nexus
+
+# Go build cache
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Module download cache
+vendor/
+
+# Runtime data
+~/.nexus/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+*.env.local
+config.yaml
