@@ -1,6 +1,6 @@
 # Binary output
 bin/
-nexus
+/nexus
 
 # Go build cache
 *.exe
