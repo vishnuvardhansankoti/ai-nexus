@@ -1,7 +1,12 @@
 // Package main is the entry point for the Nexus AI agent harness binary.
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+
+	"github.com/spf13/cobra"
+)
 
 // Version and Commit are injected at build time via -ldflags.
 var (
@@ -9,6 +14,23 @@ var (
 	Commit  = "unknown"
 )
 
+var rootCmd = &cobra.Command{
+	Use:   "nexus",
+	Short: "AI agent harness with 3-layer routing",
+	Long:  "Nexus routes prompts to the right model tier automatically, enforces governance, and persists memory across sessions.",
+}
+
 func main() {
-	fmt.Printf("nexus %s (%s)\n", Version, Commit)
+	rootCmd.AddCommand(
+		chatCmd,
+		statusCmd,
+		configCmd,
+		versionCmd,
+		serveCmd,
+	)
+
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }

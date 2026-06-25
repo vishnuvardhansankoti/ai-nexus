@@ -6,7 +6,7 @@ VERSION=v0.0.0-dev
 .PHONY: build test lint generate clean
 
 build:
-	go build -ldflags "-X $(MODULE)/cmd/nexus.Version=$(VERSION) -X $(MODULE)/cmd/nexus.Commit=$(COMMIT)" -o bin/$(BINARY_NAME) ./cmd/nexus
+	go build -ldflags "-X 'main.Version=$(VERSION)' -X 'main.Commit=$(COMMIT)'" -o bin/$(BINARY_NAME) ./cmd/nexus
 
 test:
 	go test ./...

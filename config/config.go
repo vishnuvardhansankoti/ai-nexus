@@ -53,7 +53,7 @@ type LayersConfig struct {
 // LayerConfig represents a single provider layer.
 type LayerConfig struct {
 	Provider   string        `yaml:"provider"    validate:"required,oneof=ollama anthropic google openai"`
-	BaseURL    string        `yaml:"base_url"    validate:"required"`
+	BaseURL    string        `yaml:"base_url"`
 	Model      string        `yaml:"model"       validate:"required"`
 	Timeout    time.Duration `yaml:"timeout"     validate:"required"`
 	APIKey     string        `yaml:"api_key"`
