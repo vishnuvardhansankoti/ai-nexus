@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/vishnuvardhansankoti/ai-nexus/config"
+	"github.com/vishnuvardhansankoti/ai-nexus/memory/episodic"
 	"github.com/vishnuvardhansankoti/ai-nexus/memory/working"
 	"github.com/vishnuvardhansankoti/ai-nexus/orchestrator"
 	"github.com/vishnuvardhansankoti/ai-nexus/sdk"
@@ -44,16 +45,60 @@ func runChat(cmd *cobra.Command, args []string) error {
 		Level: slog.LevelInfo,
 	}))
 
+	// --- Episodic store ---
+	dbPath := cfg.Memory.Episodic.DB
+	if dbPath == "" {
+		dbPath = episodic.DefaultDBPath()
+	}
+	epStore, err := episodic.New(dbPath)
+	if err != nil {
+		return fmt.Errorf("open episodic store: %w", err)
+	}
+	defer epStore.Close()
+
+	if cfg.Memory.Episodic.OpenEpisodeTimeout > 0 {
+		epStore.StartTimeoutWorker(cmd.Context(), cfg.Memory.Episodic.OpenEpisodeTimeout)
+	}
+
+	// --- Orchestrator ---
 	orch, err := orchestrator.New(cfg, logger)
 	if err != nil {
 		return fmt.Errorf("init orchestrator: %w", err)
 	}
+	orch.SetEventStore(epStore)
 
+	// --- Session / episode ---
 	sessionID := chatSessionID
 	if sessionID == "" {
 		sessionID = uuid.New().String()
 	}
 
+	var episodeID string
+	if chatSessionID != "" {
+		// Resuming: find the open episode for this session.
+		id, found, err := epStore.FindOpenEpisode(sessionID)
+		if err != nil {
+			return fmt.Errorf("find episode: %w", err)
+		}
+		if found {
+			episodeID = id
+		} else {
+			episodeID, err = epStore.OpenEpisode(sessionID)
+			if err != nil {
+				return fmt.Errorf("open episode: %w", err)
+			}
+		}
+	} else {
+		episodeID, err = epStore.OpenEpisode(sessionID)
+		if err != nil {
+			return fmt.Errorf("open episode: %w", err)
+		}
+	}
+
+	// Attach episode ID to the context so the orchestrator can write events.
+	ctx := episodic.WithEpisodeID(cmd.Context(), episodeID)
+
+	// --- Working memory ---
 	store, err := working.NewSessionStore(sessionID)
 	if err != nil {
 		return fmt.Errorf("open session: %w", err)
@@ -62,7 +107,6 @@ func runChat(cmd *cobra.Command, args []string) error {
 
 	var buf working.Buffer
 
-	// Load existing messages when resuming.
 	if chatSessionID != "" {
 		msgs, err := store.Load()
 		if err != nil {
@@ -73,7 +117,11 @@ func runChat(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	ctx := cmd.Context()
+	closeEpisode := func(outcome string) {
+		if err := epStore.CloseEpisode(episodeID, outcome); err != nil {
+			logger.Warn("close episode failed", "err", err)
+		}
+	}
 
 	sendMessage := func(userContent string) error {
 		userMsg := sdk.Message{Role: "user", Content: userContent}
@@ -99,7 +147,13 @@ func runChat(cmd *cobra.Command, args []string) error {
 
 	// Single-shot mode.
 	if chatPrompt != "" {
-		return sendMessage(chatPrompt)
+		err := sendMessage(chatPrompt)
+		if err != nil {
+			closeEpisode(episodic.OutcomeFailure)
+			return err
+		}
+		closeEpisode(episodic.OutcomeSuccess)
+		return nil
 	}
 
 	// Interactive REPL.
@@ -111,6 +165,7 @@ func runChat(cmd *cobra.Command, args []string) error {
 	go func() {
 		<-sigCh
 		fmt.Println()
+		closeEpisode(episodic.OutcomePartial)
 		os.Exit(0)
 	}()
 
@@ -131,5 +186,10 @@ func runChat(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		}
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		closeEpisode(episodic.OutcomeFailure)
+		return err
+	}
+	closeEpisode(episodic.OutcomeSuccess)
+	return nil
 }

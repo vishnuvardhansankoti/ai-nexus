@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vishnuvardhansankoti/ai-nexus/config"
+	"github.com/vishnuvardhansankoti/ai-nexus/memory/episodic"
 	"github.com/vishnuvardhansankoti/ai-nexus/providers"
 	"github.com/vishnuvardhansankoti/ai-nexus/sdk"
 )
@@ -28,6 +29,13 @@ type Orchestrator struct {
 	layerCfgs    map[string]config.LayerConfig
 	available    map[string]bool
 	logger       *slog.Logger
+	events       *episodic.Store
+}
+
+// SetEventStore attaches an episodic store so the orchestrator can record
+// orchestrator_route, llm_call, and llm_response events.
+func (o *Orchestrator) SetEventStore(store *episodic.Store) {
+	o.events = store
 }
 
 // New builds an Orchestrator from cfg, pre-warms all Ollama layers, and returns
@@ -123,8 +131,11 @@ func (o *Orchestrator) Classify(prompt string) string {
 
 // Dispatch classifies the prompt, then sends req to the appropriate layer,
 // following the fallback chain until a layer responds or all are exhausted.
+// If ctx carries an episode ID (via episodic.WithEpisodeID) and an event store
+// is attached, orchestrator_route, llm_call, and llm_response events are recorded.
 func (o *Orchestrator) Dispatch(ctx context.Context, prompt string, req sdk.Request) (sdk.Response, error) {
 	layer := o.Classify(prompt)
+	episodeID, hasEpisode := episodic.EpisodeIDFromContext(ctx)
 
 	for layer != "" {
 		if !o.available[layer] {
@@ -139,8 +150,35 @@ func (o *Orchestrator) Dispatch(ctx context.Context, prompt string, req sdk.Requ
 			continue
 		}
 
+		layerNum := layerNumber(layer)
+		model := o.layerCfgs[layer].Model
+
+		o.writeEvent(hasEpisode, episodeID, episodic.Event{
+			Type:    episodic.TypeOrchestratorRoute,
+			Layer:   layerNum,
+			Model:   model,
+			Payload: map[string]any{"layer": layer, "prompt_len": len(prompt)},
+		})
+		o.writeEvent(hasEpisode, episodeID, episodic.Event{
+			Type:  episodic.TypeLLMCall,
+			Layer: layerNum,
+			Model: model,
+		})
+
+		start := time.Now()
 		resp, err := o.layers[layer].Chat(ctx, req)
+		latency := time.Since(start).Milliseconds()
+
 		if err == nil {
+			o.writeEvent(hasEpisode, episodeID, episodic.Event{
+				Type:      episodic.TypeLLMResponse,
+				Layer:     layerNum,
+				Model:     resp.Model,
+				LatencyMs: latency,
+				TokensIn:  resp.TokensIn,
+				TokensOut: resp.TokensOut,
+				Payload:   map[string]any{"content": resp.Content},
+			})
 			return resp, nil
 		}
 
@@ -155,6 +193,29 @@ func (o *Orchestrator) Dispatch(ctx context.Context, prompt string, req sdk.Requ
 	}
 
 	return sdk.Response{}, fmt.Errorf("orchestrator: all layers exhausted")
+}
+
+// writeEvent records an event to the episodic store when conditions are met.
+func (o *Orchestrator) writeEvent(hasEpisode bool, episodeID string, ev episodic.Event) {
+	if !hasEpisode || o.events == nil {
+		return
+	}
+	if err := o.events.AppendEvent(episodeID, ev); err != nil {
+		o.logger.Warn("orchestrator: write event failed", "type", ev.Type, "err", err)
+	}
+}
+
+func layerNumber(name string) int {
+	switch name {
+	case "layer1":
+		return 1
+	case "layer2":
+		return 2
+	case "layer3":
+		return 3
+	default:
+		return 0
+	}
 }
 
 // DispatchStream classifies the prompt, then streams the response from the

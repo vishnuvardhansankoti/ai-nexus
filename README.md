@@ -30,6 +30,7 @@ A locally-run AI agent harness for developers. Nexus sits between you and your m
 - **Ollama pre-warm** — on startup, Nexus pings each local Ollama model to verify it is loaded. Unresponsive layers are marked down and fallback activates before any user request hits them.
 - **Cloud provider support** — Layer 3 can be backed by Anthropic (Claude), Google (Gemini), or OpenAI (GPT-4o), or kept local with a 70B Ollama model. Configured entirely in YAML; no code change required.
 - **Session memory** — every conversation is persisted to a per-session SQLite file at `~/.nexus/sessions/<id>.db`. Resume any session with `nexus chat --session <id>`.
+- **Episodic memory** — every request lifecycle is recorded as a causal event log in `~/.nexus/episodic.db`. Each session maps to an episode; the orchestrator writes `orchestrator_route`, `llm_call`, and `llm_response` events with latency and token counts. Episodes survive crashes — restart with `--session <id>` and new events are appended to the existing open episode. A background worker marks episodes that exceeded `open_episode_timeout` as failed.
 - **Governance middleware** _(Phase 3)_ — pre-LLM input guard (PII, prompt injection detection) and post-LLM output guard (content filtering, token cap). Fully rule-driven; rejection returns a structured error.
 - **OpenAI-compatible REST API** _(Phase 4)_ — `POST /v1/chat/completions` implements the OpenAI request/response schema so Continue, Cursor, and litellm work as drop-in clients with no modification.
 - **Prometheus metrics** _(Phase 5)_ — request counts, latency histograms, governance rejection counts, and layer availability gauges on `GET /metrics`.
@@ -249,6 +250,19 @@ memory:
 
 Session files are written to `~/.nexus/sessions/<id>.db`. Each file holds the full message history for that session. Use `nexus chat --session <id>` to resume.
 
+The episodic store (`memory.episodic.db`) records every request as a structured event log. Each session has one episode. Events written per turn:
+
+| Event type | Written by | Contains |
+|---|---|---|
+| `episode_open` | `nexus chat` startup | session ID |
+| `orchestrator_route` | Orchestrator | layer name, prompt length |
+| `llm_call` | Orchestrator | layer, model |
+| `llm_response` | Orchestrator | latency ms, tokens in/out, content snippet |
+| `episode_close` | `nexus chat` exit | outcome, keyword summary |
+| `governance_reject` / `governance_pass` | Governance _(Phase 3)_ | rule name |
+
+Episodes have four outcomes: `success`, `failure`, `partial` (Ctrl+C), `escalated`. A background goroutine marks open episodes older than `open_episode_timeout` as `failed`.
+
 ### Auth and rate limiting
 
 ```yaml
@@ -425,7 +439,7 @@ orchestrator/       Keyword classifier + layer dispatch + fallback chain
 governance/         Input/output guard middleware (Phase 3)
 memory/
   working/          In-process buffer + per-session SQLite file
-  episodic/         Causal event log (Phase 2)
+  episodic/         Causal event log — episodes + events tables, FTS5 index, timeout worker
   semantic/         Document graph (Phase 6, stub)
   archival/         RAG vector store (Phase 6, stub)
 providers/
@@ -446,9 +460,9 @@ agents/coding/      Coding sub-agent (Phase 8, stub)
 Packages may only import in the following directions (no circular imports):
 
 ```
-cmd  →  everything
-api  →  orchestrator, governance, memory/*, providers/*, config, sdk
-orchestrator  →  providers/*, config, sdk
+cmd           →  everything
+api           →  orchestrator, governance, memory/*, providers/*, config, sdk
+orchestrator  →  providers/*, config, sdk, memory/episodic
 governance    →  config, sdk
 memory/*      →  config, sdk
 providers/*   →  sdk
@@ -497,7 +511,7 @@ go test -v ./providers/ollama/...  # verbose
 |---|---|---|
 | 0 — Scaffold | Repo structure, SDK interfaces, config loader, CI | ✅ Done |
 | 1 — Routing + CLI | Ollama + cloud providers, orchestrator, `nexus chat` | ✅ Done |
-| 2 — Episodic Store | SQLite causal event log, crash recovery | 🔜 Next |
+| 2 — Episodic Store | SQLite causal event log, crash recovery | ✅ Done |
 | 3 — Governance | Input/output guard middleware | Planned |
 | 4 — REST API | OpenAI-compatible HTTP server | Planned |
 | 5 — Observability | Structured logs, Prometheus metrics | Planned |
@@ -511,4 +525,7 @@ v2 adds: cloud providers for all layers, semantic memory, tools/skills registry,
 - [`docs/idea.md`](docs/idea.md) — full feature specification
 - [`docs/prd.md`](docs/prd.md) — product requirements and v1 config schema
 - [`docs/dev-plan.md`](docs/dev-plan.md) — phase-by-phase implementation plan
+- [`docs/phase0-agent-brief.md`](docs/phase0-agent-brief.md) — agent brief: repository scaffold
+- [`docs/phase1-agent-brief.md`](docs/phase1-agent-brief.md) — agent brief: 3-layer routing + CLI
+- [`docs/phase2-agent-brief.md`](docs/phase2-agent-brief.md) — agent brief: episodic store
 - [`openapi.yaml`](openapi.yaml) — OpenAPI 3.1 specification for the REST API
